@@ -48,6 +48,7 @@
     "@types/btoa": "^1.2.3",
     "@types/dateformat": "^3.0.1",
     "@types/deepmerge": "^2.2.0",
+    "@types/get-value": "^3.0.3",
     "@types/glob": "^7.2.0",
     "@types/google-protobuf": "^3.7.2",
     "@types/js-yaml": "^3.12.2",
@@ -73,6 +74,7 @@
     "fast-json-stable-stringify": "^2.1.0",
     "fast-safe-stringify": "^2.1.1",
     "filename-reserved-regex": "^2.0.0",
+    "get-value": "^3.0.1",
     "glob": "^7.1.6",
     "google-protobuf": "^3.20.1",
     "hash.js": "^1.1.7",
@@ -164,9 +166,9 @@
   "arduino": {
     "cli": {
       "version": {
-        "owner": "arduino",
+        "owner": "kittaakos",
         "repo": "arduino-cli",
-        "commitish": "71a8576"
+        "commitish": "cb178696f9c355f0fb6b574fb906ddf5fbba96d1"
       }
     },
     "fwuploader": {

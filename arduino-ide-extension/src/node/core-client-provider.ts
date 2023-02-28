@@ -1,15 +1,30 @@
-import { join } from 'path';
 import * as grpc from '@grpc/grpc-js';
+import { DisposableCollection } from '@theia/core/lib/common/disposable';
+import { Emitter } from '@theia/core/lib/common/event';
+import { Deferred } from '@theia/core/lib/common/promise-util';
 import {
   inject,
   injectable,
   postConstruct,
 } from '@theia/core/shared/inversify';
-import { Emitter } from '@theia/core/lib/common/event';
+import { Disposable } from '@theia/core/shared/vscode-languageserver-protocol';
+import { Message } from 'google-protobuf';
+import {
+  AdditionalUrls,
+  IndexType,
+  IndexUpdateDidCompleteParams,
+  IndexUpdateDidFailParams,
+  IndexUpdateSummary,
+  IndexUpdateWillStartParams,
+  NotificationServiceServer,
+} from '../common/protocol';
+import { ArduinoDaemonImpl } from './arduino-daemon-impl';
+import * as commandsGrpcPb from './cli-protocol/cc/arduino/cli/commands/v1/commands_grpc_pb';
 import { ArduinoCoreServiceClient } from './cli-protocol/cc/arduino/cli/commands/v1/commands_grpc_pb';
-import { Instance } from './cli-protocol/cc/arduino/cli/commands/v1/common_pb';
 import {
   CreateRequest,
+  FailedInstanceInitError,
+  FailedInstanceInitReason,
   InitRequest,
   InitResponse,
   UpdateIndexRequest,
@@ -17,32 +32,15 @@ import {
   UpdateLibrariesIndexRequest,
   UpdateLibrariesIndexResponse,
 } from './cli-protocol/cc/arduino/cli/commands/v1/commands_pb';
-import * as commandsGrpcPb from './cli-protocol/cc/arduino/cli/commands/v1/commands_grpc_pb';
-import {
-  IndexType,
-  IndexUpdateDidCompleteParams,
-  IndexUpdateSummary,
-  IndexUpdateDidFailParams,
-  IndexUpdateWillStartParams,
-  NotificationServiceServer,
-  AdditionalUrls,
-} from '../common/protocol';
-import { Deferred } from '@theia/core/lib/common/promise-util';
-import {
-  Status as RpcStatus,
-  Status,
-} from './cli-protocol/google/rpc/status_pb';
+import { Instance } from './cli-protocol/cc/arduino/cli/commands/v1/common_pb';
 import { ConfigServiceImpl } from './config-service-impl';
-import { ArduinoDaemonImpl } from './arduino-daemon-impl';
-import { DisposableCollection } from '@theia/core/lib/common/disposable';
-import { Disposable } from '@theia/core/shared/vscode-languageserver-protocol';
 import {
-  IndexesUpdateProgressHandler,
-  ExecuteWithProgress,
   DownloadResult,
+  ExecuteWithProgress,
+  IndexesUpdateProgressHandler,
 } from './grpc-progressible';
-import type { DefaultCliConfig } from './cli-config';
 import { ServiceError } from './service-error';
+import { deserializeBinaryFromGlobal } from './utils/proto';
 
 @injectable()
 export class CoreClientProvider {
@@ -238,7 +236,7 @@ export class CoreClientProvider {
     instance,
   }: CoreClientProvider.Client): Promise<void> {
     return new Promise<void>((resolve, reject) => {
-      const errors: RpcStatus[] = [];
+      const errors: Message[] = [];
       client
         .init(new InitRequest().setInstance(instance))
         .on('data', (resp: InitResponse) => {
@@ -246,16 +244,45 @@ export class CoreClientProvider {
           // According to the gRPC API, the CLI should send either a `TaskProgress` or a `DownloadProgress`, but it does not.
           const error = resp.getError();
           if (error) {
-            const { code, message } = Status.toObject(false, error);
             console.error(
-              `Detected an error response during the gRPC core client initialization: code: ${code}, message: ${message}`
+              `Detected an error response during the gRPC core client initialization: code: ${error.getCode()}, message: ${error.getMessage()}`
             );
-            errors.push(error);
+            const details = error.getDetailsList();
+            if (!details.length) {
+              console.warn(
+                `The error status does not have any details information. Cannot handle error status. ${JSON.stringify(
+                  error.toObject(false)
+                )}`
+              );
+              return;
+            }
+            if (details.length > 1) {
+              console.warn(
+                `Detected more than one details for the error status. Only the first is handled. Ignoring the rest. ${JSON.stringify(
+                  error.toObject(false)
+                )}`
+              );
+            }
+            const head = details[0];
+            const typeName = head.getTypeName();
+            const deserialize = deserializeBinaryFromGlobal(typeName);
+            if (deserialize) {
+              const error = head.unpack(deserialize, typeName);
+              if (error) {
+                errors.push(error);
+              }
+            } else {
+              console.warn(
+                `Could not find deserializeBinary function in the 'global' object for type name: ${typeName}. Cannot handle error status. ${JSON.stringify(
+                  error.toObject(false)
+                )}`
+              );
+            }
           }
         })
         .on('error', reject)
-        .on('end', async () => {
-          const error = await this.evaluateErrorStatus(errors);
+        .on('end', () => {
+          const error = this.evaluateErrorStatus(errors);
           if (error) {
             reject(error);
             return;
@@ -265,16 +292,8 @@ export class CoreClientProvider {
     });
   }
 
-  private async evaluateErrorStatus(
-    status: RpcStatus[]
-  ): Promise<Error | undefined> {
-    await this.configService.getConfiguration(); // to ensure the CLI config service has been initialized.
-    const { cliConfiguration } = this.configService;
-    if (!cliConfiguration) {
-      // If the CLI config is not available, do not even try to guess what went wrong.
-      return new Error(`Could not read the CLI configuration file.`);
-    }
-    return isIndexUpdateRequiredBeforeInit(status, cliConfiguration); // put future error matching here
+  private evaluateErrorStatus(errorStatus: Message[]): Error | undefined {
+    return isIndexUpdateRequiredBeforeInit(errorStatus);
   }
 
   /**
@@ -476,48 +495,36 @@ export abstract class CoreClientAware {
 
 class MustUpdateIndexesBeforeInitError extends Error {
   readonly indexTypesToUpdate: Set<IndexType>;
-  constructor(causes: [RpcStatus.AsObject, IndexType][]) {
-    super(`The index of the cores and libraries must be updated before initializing the core gRPC client.
-The following problems were detected during the gRPC client initialization:
-${causes
-  .map(
-    ([{ code, message }, type]) =>
-      `[${type}-index] - code: ${code}, message: ${message}`
-  )
-  .join('\n')}
-`);
+  constructor(toUpdate: IndexType[]) {
+    super(
+      'The index of the cores and libraries must be updated before initializing the core gRPC client.'
+    );
     Object.setPrototypeOf(this, MustUpdateIndexesBeforeInitError.prototype);
-    this.indexTypesToUpdate = new Set(causes.map(([, type]) => type));
-    if (!causes.length) {
+    this.indexTypesToUpdate = new Set(toUpdate);
+    if (!toUpdate.length) {
       throw new Error(`expected non-empty 'causes'`);
     }
   }
 }
 
 function isIndexUpdateRequiredBeforeInit(
-  status: RpcStatus[],
-  cliConfig: DefaultCliConfig
+  errorStatus: Message[]
 ): MustUpdateIndexesBeforeInitError | undefined {
-  const causes = status.reduce((acc, curr) => {
+  const causes = errorStatus.reduce((acc, curr) => {
     for (const [predicate, type] of IndexUpdateRequiredPredicates) {
-      if (predicate(curr, cliConfig)) {
-        acc.push([curr.toObject(false), type]);
+      if (predicate(curr)) {
+        acc.push(type);
         return acc;
       }
     }
     return acc;
-  }, [] as [RpcStatus.AsObject, IndexType][]);
+  }, [] as IndexType[]);
   return causes.length
     ? new MustUpdateIndexesBeforeInitError(causes)
     : undefined;
 }
 interface Predicate {
-  (
-    status: RpcStatus,
-    {
-      directories: { data },
-    }: DefaultCliConfig
-  ): boolean;
+  (errorStatus: Message): boolean;
 }
 const IndexUpdateRequiredPredicates: [Predicate, IndexType][] = [
   [isPrimaryPackageIndexMissingStatus, 'platform'],
@@ -525,42 +532,38 @@ const IndexUpdateRequiredPredicates: [Predicate, IndexType][] = [
   [isLibraryIndexMissingStatus, 'library'],
 ];
 // Loading index file: loading json index file /path/to/package_index.json: open /path/to/package_index.json: no such file or directory
-function isPrimaryPackageIndexMissingStatus(
-  status: RpcStatus,
-  { directories: { data } }: DefaultCliConfig
-): boolean {
-  const predicate = ({ message }: RpcStatus.AsObject) =>
-    message.includes('loading json index file') &&
-    message.includes(join(data, 'package_index.json'));
-  // https://github.com/arduino/arduino-cli/blob/f0245bc2da6a56fccea7b2c9ea09e85fdcc52cb8/arduino/cores/packagemanager/package_manager.go#L247
-  return evaluate(status, predicate);
+function isPrimaryPackageIndexMissingStatus(errorStatus: Message): boolean {
+  if (errorStatus instanceof FailedInstanceInitError) {
+    const reason = errorStatus.getReason();
+    return (
+      reason ===
+      FailedInstanceInitReason.FAILED_INSTANCE_INIT_REASON_INDEX_LOAD_ERROR
+    );
+  }
+  return false;
 }
 // Error loading hardware platform: discovery $TOOL_NAME not found
-function isDiscoveryNotFoundStatus(status: RpcStatus): boolean {
-  const predicate = ({ message }: RpcStatus.AsObject) =>
-    message.includes('discovery') &&
-    (message.includes('not found') ||
-      message.includes('loading hardware platform'));
-  // https://github.com/arduino/arduino-cli/blob/f0245bc2da6a56fccea7b2c9ea09e85fdcc52cb8/arduino/cores/packagemanager/loader.go#L740
-  // https://github.com/arduino/arduino-cli/blob/f0245bc2da6a56fccea7b2c9ea09e85fdcc52cb8/arduino/cores/packagemanager/loader.go#L744
-  return evaluate(status, predicate);
+function isDiscoveryNotFoundStatus(errorStatus: Message): boolean {
+  if (errorStatus instanceof FailedInstanceInitError) {
+    // https://github.com/arduino/arduino-cli/blob/f0245bc2da6a56fccea7b2c9ea09e85fdcc52cb8/arduino/cores/packagemanager/loader.go#L740
+    // https://github.com/arduino/arduino-cli/blob/f0245bc2da6a56fccea7b2c9ea09e85fdcc52cb8/arduino/cores/packagemanager/loader.go#L744
+    const reason = errorStatus.getReason();
+    return (
+      reason ===
+      FailedInstanceInitReason.FAILED_INSTANCE_INIT_REASON_TOOL_LOAD_ERROR
+    );
+  }
+  return false;
 }
 // Loading index file: reading library_index.json: open /path/to/library_index.json: no such file or directory
-function isLibraryIndexMissingStatus(
-  status: RpcStatus,
-  { directories: { data } }: DefaultCliConfig
-): boolean {
-  const predicate = ({ message }: RpcStatus.AsObject) =>
-    message.includes('index file') &&
-    message.includes('reading') &&
-    message.includes(join(data, 'library_index.json'));
+function isLibraryIndexMissingStatus(errorStatus: Message): boolean {
   // https://github.com/arduino/arduino-cli/blob/f0245bc2da6a56fccea7b2c9ea09e85fdcc52cb8/arduino/cores/packagemanager/package_manager.go#L247
-  return evaluate(status, predicate);
-}
-function evaluate(
-  subject: RpcStatus,
-  predicate: (error: RpcStatus.AsObject) => boolean
-): boolean {
-  const status = RpcStatus.toObject(false, subject);
-  return predicate(status);
+  if (errorStatus instanceof FailedInstanceInitError) {
+    const reason = errorStatus.getReason();
+    return (
+      reason ===
+      FailedInstanceInitReason.FAILED_INSTANCE_INIT_REASON_LIBRARY_LOAD_ERROR
+    );
+  }
+  return false;
 }
