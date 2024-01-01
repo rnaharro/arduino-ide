@@ -139,6 +139,7 @@
       "installManually": "Χειροκίνητη Εγκατάσταση",
       "later": "Αργότερα",
       "noBoardSelected": "Δεν έχει επιλεχθεί πλακέτα",
+      "noSketchOpened": "No sketch opened",
       "notConnected": "[μη συνδεμένο]",
       "offlineIndicator": "Φαίνεται πως είστε εκτός σύνδεσης. Χωρίς σύνδεση στο Internet, το Arduino CLI ίσως να μη μπορεί να κάνει λήψη των απαιτούμενων πόρων και να υπάρξει δυσλειτουργία. Παρακαλώ συνδεθείτε στο Internet και επανεκκινήστε την εφαρμογή.",
       "oldFormat": "Το '{0}' χρησιμοποιεί ακόμα το παλιό '.pde' στυλ. Θέλετε να αλλάξετε στην νέα κατάληξη '.ino';",
@@ -146,6 +147,7 @@
       "processing": "Επεξεργασία",
       "recommended": "Recommended",
       "retired": "Retired",
+      "selectManually": "Select Manually",
       "selectedOn": "στο {0}",
       "serialMonitor": "Παρακολούθηση Σειριακής",
       "type": "Type",
@@ -209,7 +211,9 @@
     "debug": {
       "debugWithMessage": "Αποσφαλμάτωση - {0}",
       "debuggingNotSupported": "Δεν υποστιρίζεται αποσφαλμάτωση από '{0}'",
+      "getDebugInfo": "Getting debug info...",
       "noPlatformInstalledFor": "Δεν έχει εγκατασταθεί πλατφόρμα για '{0}'",
+      "noProgrammerSelectedFor": "No programmer selected for '{0}'",
       "optimizeForDebugging": "Βελτιστοποίηση για Αποσφαλμάτωση",
       "sketchIsNotCompiled": "Sketch '{0}' must be verified before starting a debug session. Please verify the sketch and start debugging again. Do you want to verify the sketch now?"
     },
